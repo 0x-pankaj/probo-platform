@@ -3,6 +3,7 @@ use crate::{
     types::api::{MessageFromApi, MessageToApi},
 };
 use actix::AsyncContext;
+use actix_cors::Cors;
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use actix_web_actors::ws;
 use futures_util::StreamExt;
@@ -17,7 +18,12 @@ struct AppState {
 pub async fn run_api_server(redis: RedisManager, addr: &str) -> std::io::Result<()> {
     let state = Arc::new(AppState { redis });
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_header()
+            .allow_any_method();
         App::new()
+            .wrap(cors)
             .app_data(web::Data::new(state.clone()))
             .route("/order", web::post().to(place_order))
             .route("/cancel", web::post().to(cancel_order))

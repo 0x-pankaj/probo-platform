@@ -32,13 +32,13 @@ async fn main() {
     // Use tokio::select! to handle multiple concurrent futures
     tokio::select! {
         // Run the API server directly (not in a separate tokio task)
-        api_result = run_api_server(redis.clone(), "0.0.0.0:3000") => {
+        api_result = run_api_server(redis.clone(), "0.0.0.0:8000") => {
             if let Err(e) = api_result {
                 tracing::error!("API server error: {}", e);
             }
         }
         // Run the WebSocket server directly (not in a separate tokio task)
-        ws_result = run_ws_server(redis.clone(), "0.0.0.0:3001") => {
+        ws_result = run_ws_server(redis.clone(), "0.0.0.0:8001") => {
             if let Err(e) = ws_result {
                 tracing::error!("WebSocket server error: {}", e);
             }
