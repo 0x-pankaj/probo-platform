@@ -2,7 +2,7 @@ use crate::{
     engine::matching_engine::MatchingEngine, redis::manager::RedisManager,
     types::api::MessageFromApi,
 };
-use actix::{Actor, Context, Handler, Message};
+// use actix::{Actor, Context, Handler, Message};
 
 pub struct EngineProcessor {
     engine: MatchingEngine,
@@ -25,11 +25,16 @@ impl EngineProcessor {
                 .await
             {
                 Ok(Some(message)) => {
+                    println!("message from api: {:?}", message);
                     if let Err(e) = self.process(message).await {
                         tracing::error!("Error processing message: {}", e);
                     }
                 }
-                Ok(None) => continue,
+                Ok(None) => {
+                    //if queue is empty
+                    tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!("Redis error: {}", e);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -96,18 +101,18 @@ impl EngineProcessor {
     }
 }
 
-impl Actor for EngineProcessor {
-    type Context = Context<Self>;
-}
+// impl Actor for EngineProcessor {
+//     type Context = Context<Self>;
+// }
 
-#[derive(Message)]
-#[rtype(result = "Result<(), String>")]
-struct ProcessMessage(MessageFromApi);
+// #[derive(Message)]
+// #[rtype(result = "Result<(), String>")]
+// struct ProcessMessage(MessageFromApi);
 
-impl Handler<ProcessMessage> for EngineProcessor {
-    type Result = Result<(), String>;
+// impl Handler<ProcessMessage> for EngineProcessor {
+//     type Result = Result<(), String>;
 
-    fn handle(&mut self, msg: ProcessMessage, _ctx: &mut Context<Self>) -> Self::Result {
-        futures::executor::block_on(self.process(msg.0))
-    }
-}
+//     fn handle(&mut self, msg: ProcessMessage, _ctx: &mut Context<Self>) -> Self::Result {
+//         futures::executor::block_on(self.process(msg.0))
+//     }
+// }

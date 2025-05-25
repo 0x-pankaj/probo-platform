@@ -43,13 +43,21 @@ impl RedisManager {
     ) -> Result<Option<T>, redis::RedisError> {
         let mut conn = self.get_conn().await?;
         // Blocking pop with timeout in seconds
-        let result: Option<(String, String)> = conn.brpop(queue, 0.0).await?;
+        let result: Option<(String, String)> = conn.brpop(queue, 1.0).await?;
 
         match result {
             Some((_queue_name, serialized_value)) => {
-                let message =
-                    serde_json::from_str(&serialized_value).expect("Failed to deserialize message");
-                Ok(Some(message))
+                match serde_json::from_str(&serialized_value) {
+                    Ok(message) => Ok(Some(message)),
+                    Err(e) => {
+                        tracing::error!("Failed to deserialized message: {}", e);
+                        Err(redis::RedisError::from((
+                            redis::ErrorKind::TypeError,
+                            "Deserialization error",
+                            e.to_string(),
+                        )))
+                    }
+                }
             }
             None => Ok(None),
         }

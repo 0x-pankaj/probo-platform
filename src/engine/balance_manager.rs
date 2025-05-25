@@ -11,9 +11,7 @@ impl BalanceManager {
         let balances = Arc::new(DashMap::new());
         balances.insert(1, (1000.0, 0.0));
         balances.insert(2, (1000.0, 0.0));
-        BalanceManager {
-            balances: Arc::new(DashMap::new()),
-        }
+        BalanceManager { balances }
     }
 
     pub async fn get_balance(&self, user_id: u32) -> (f64, f64) {

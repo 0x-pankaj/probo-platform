@@ -37,6 +37,7 @@ impl MatchingEngine {
         client_id: String,
     ) -> Result<(), String> {
         let mut markets = self.markets.write().await;
+        println!("existing market: {:?}", markets);
         if markets.contains_key(&market_id) {
             return Err("Market already exists".to_string());
         }
@@ -72,6 +73,21 @@ impl MatchingEngine {
         order_id
     }
 
+    pub async fn generate_market(&self) {
+        let mut markets = self.markets.write().await;
+        let market_id = String::from("market_1");
+
+        markets.insert(
+            market_id,
+            (
+                OrderBook::new(OptionType::Yes),
+                OrderBook::new(OptionType::No),
+            ),
+        );
+
+        // Market::new(market_id.clone(), question);
+    }
+
     pub async fn place_order(
         &self,
         user_id: u32,
@@ -95,6 +111,7 @@ impl MatchingEngine {
         }
 
         let order_id = self.generate_order_id().await;
+        println!("OrderId: {:?}", order_id);
         let mut order = Order::new(
             order_id,
             user_id,
@@ -104,24 +121,76 @@ impl MatchingEngine {
             price,
             quantity,
         );
+        println!("order: {:?}", order);
 
-        let mut markets = self.markets.write().await;
-        let (yes_book, no_book) = markets
-            .get_mut(&market_id)
-            .ok_or("Market not found".to_string())?;
-
-        let book = match option {
-            OptionType::Yes => yes_book,
-            OptionType::No => no_book,
+        //Acquiring lock only for accessing order book
+        let (mut yes_book, mut no_book) = {
+            let mut markets = self.markets.write().await;
+            println!("Acquired markets lock in place_order");
+            let (yes, no) = markets
+                .remove(&market_id)
+                .ok_or("Market not found".to_string())?;
+            (yes, no)
         };
 
-        if order.quantity > 0 {
-            book.add_order(order.clone());
-            self.redis
-                .push_message("db_queue", &DbMessage::SaveOrder(order.clone()))
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+        // let mut markets = self.markets.write().await;
+        // let (yes_book, no_book) = markets
+        //     .get_mut(&market_id)
+        //     .ok_or("Market not found".to_string())?;
+
+        //running matching logic
+        let trades = self
+            .match_order(
+                &mut order,
+                &market_id,
+                &mut yes_book,
+                &mut no_book,
+                client_id.clone(),
+            )
+            .await?;
+        println!("matched_order: {:?} ", trades);
+
+        let book = match option {
+            OptionType::Yes => &mut yes_book,
+            OptionType::No => &mut no_book,
+        };
+        println!("placed Order: {:?}", book);
+        //handeling ordeer placement based on option type
+        let (bids, asks) = match option {
+            OptionType::Yes => {
+                if order.quantity == 0 {
+                    yes_book.remove_order(order_type, price, order_id);
+                } else {
+                    yes_book.add_order(order.clone());
+                }
+
+                //saving order if quantity remains
+                if order.quantity > 0 {
+                    self.redis
+                        .push_message("db_queue", &DbMessage::SaveOrder(order.clone()))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                yes_book.get_depth()
+            }
+            OptionType::No => {
+                if order.quantity == 0 {
+                    no_book.remove_order(order_type, price, order_id);
+                } else {
+                    no_book.add_order(order.clone());
+                }
+
+                no_book.get_depth()
+            }
+        };
+
+        println!(
+            "Placed order: {:?}",
+            match option {
+                OptionType::Yes => &yes_book,
+                OptionType::No => &no_book,
+            }
+        );
 
         self.redis
             .publish_message(
@@ -134,17 +203,14 @@ impl MatchingEngine {
             .await
             .map_err(|e| e.to_string())?;
 
-        let trades = self
-            .match_order(&mut order, &market_id, client_id.clone())
-            .await?;
-
-        if order.quantity == 0 {
-            book.remove_order(order_type, price, order_id);
-        } else {
-            book.add_order(order.clone());
+        //updating market with modified orderbook
+        {
+            let mut markets = self.markets.write().await;
+            println!("Acquired markets lock to update order books");
+            markets.insert(market_id.clone(), (yes_book, no_book));
+            println!("Released markets lock after updating order books");
         }
 
-        let (bids, asks) = book.get_depth();
         self.redis
             .publish_message(
                 "market_updates",
@@ -177,18 +243,30 @@ impl MatchingEngine {
         &self,
         order: &mut Order,
         market_id: &str,
+        yes_book: &mut OrderBook,
+        no_book: &mut OrderBook,
         client_id: String,
     ) -> Result<Vec<Trade>, String> {
+        println!(
+            "starting match_order: order={:?}, market_id={:?}",
+            order, market_id
+        );
         let mut trades = Vec::new();
         let mut remaining_quantity = order.quantity;
+        println!("after remaing");
+        // let mut markets = self.markets.write().await;
+        println!("after markets instance");
+        // let market = markets
+        //     .get_mut(market_id)
+        //     .ok_or("Market not found".to_string())?;
 
-        let mut markets = self.markets.write().await;
+        // println!("before book extraction");
+        // let (yes_book, no_book) = market;
 
-        let market = markets
-            .get_mut(market_id)
-            .ok_or("Market not found".to_string())?;
-
-        let (yes_book, no_book) = market;
+        println!(
+            "Before match_with_book: remaing_quantity={}",
+            remaining_quantity
+        );
 
         if order.option == OptionType::Yes {
             remaining_quantity = self
@@ -200,6 +278,10 @@ impl MatchingEngine {
                 .await?;
         };
 
+        println!(
+            "After match_with_book: remaing_quantity: {}",
+            remaining_quantity
+        );
         let counter_book = if order.option == OptionType::Yes {
             no_book
         } else {
@@ -244,7 +326,7 @@ impl MatchingEngine {
                 .await
                 .map_err(|e| e.to_string())?;
         }
-
+        println!("trades from matching engine: {:?}", trades);
         Ok(trades)
     }
 
@@ -256,14 +338,23 @@ impl MatchingEngine {
         trades: &mut Vec<Trade>,
         client_id: &str,
     ) -> Result<u32, String> {
+        // let mut redis_messages = Vec::new();
+
         match order.order_type {
             OrderType::Buy => {
                 while remaining_quantity > 0 {
                     if let Some((&ask_price_cents, asks)) = book.asks.iter_mut().next() {
                         let ask_price = ask_price_cents as f64 / 100.0;
+                        println!(
+                            "Buy: checking ask_price={} vs order_price={}",
+                            ask_price, order.price
+                        );
+
                         if ask_price <= order.price {
                             if let Some(ask) = asks.pop_front() {
                                 let matched_quantity = remaining_quantity.min(ask.quantity);
+                                println!("BUY: matched_quantity={}", matched_quantity);
+
                                 let trade = Trade {
                                     buy_order_id: order.id,
                                     sell_order_id: ask.id,
@@ -283,6 +374,21 @@ impl MatchingEngine {
                                     .deduct_balance(order.user_id, amount, self.commission_rate)
                                     .await?;
                                 self.balances.credit_balance(ask.user_id, amount).await?;
+
+                                // redis_messages.push(DbMessage::UpdateBalance {
+                                //     user_id: order.user_id,
+                                //     balance: self.balances.get_balance(order.user_id).await.0,
+                                // });
+                                // redis_messages.push(DbMessage::UpdateBalance {
+                                //     user_id: ask.user_id,
+                                //     balance: self.balances.get_balance(ask.user_id).await.0,
+                                // });
+                                // redis_messages.push(DbMessage::SaveMarket(trade.clone()));
+                                // redis_messages.push(MessageToApi::OrderMatched {
+                                //     trade: trade.clone(),
+                                //     client_id: client_id.to_string(),
+                                // });
+
                                 self.redis
                                     .push_message(
                                         "db_queue",
@@ -334,9 +440,14 @@ impl MatchingEngine {
                                 }
                             }
                         } else {
+                            println!(
+                                "BUY: no match , ask_price={} > order.price={}",
+                                ask_price, order.price
+                            );
                             break;
                         }
                     } else {
+                        println!("Buy: no asks available");
                         break;
                     }
                 }
@@ -345,9 +456,16 @@ impl MatchingEngine {
                 while remaining_quantity > 0 {
                     if let Some((&bid_price_cents, bids)) = book.bids.iter_mut().rev().next() {
                         let bid_price = bid_price_cents as f64 / 100.0;
+                        println!(
+                            "Sell: checking bid_price={} vs order_price={}",
+                            bid_price, order.price
+                        );
+
                         if bid_price >= order.price {
                             if let Some(bid) = bids.pop_front() {
                                 let matched_quantity = remaining_quantity.min(bid.quantity);
+                                println!("Sell: matched_quantity={}", matched_quantity);
+
                                 let trade = Trade {
                                     buy_order_id: bid.id,
                                     sell_order_id: order.id,
@@ -367,6 +485,21 @@ impl MatchingEngine {
                                     .deduct_balance(bid.user_id, amount, self.commission_rate)
                                     .await?;
                                 self.balances.credit_balance(order.user_id, amount).await?;
+
+                                // redis_messages.push(DbMessage::UpdateBalance {
+                                //     user_id: bid.user_id,
+                                //     balance: self.balances.get_balance(bid.user_id),
+                                // });
+                                // redis_messages.push(DbMessage::UpdateBalance {
+                                //     user_id: order.user_id,
+                                //     balance: self.balances.get_balance(order.user_id),
+                                // });
+                                // redis_messages.push(DbMessage::SaveTrade(trade.clone()));
+                                // redis_messages.push(MessageToApi::OrderMatched {
+                                //     trade: trade.clone(),
+                                //     client_id: client_id.to_string(),
+                                // });
+
                                 self.redis
                                     .push_message(
                                         "db_queue",
@@ -418,14 +551,46 @@ impl MatchingEngine {
                                 }
                             }
                         } else {
+                            println!(
+                                "Sell: no_match, bid_price={} < order.price={}",
+                                bid_price, order.price
+                            );
                             break;
                         }
                     } else {
+                        println!("Sell: no bids available");
                         break;
                     }
                 }
             }
         }
+
+        //sending batched redis message
+        // for msg in redis_messages {
+        //     match msg {
+        //         DbMessage::UpdateBalance { user_id, balance } => {
+        //             self.redis
+        //                 .push_message("db_queue", &DbMessage::UpdateBalance { user_id, balance })
+        //                 .await
+        //                 .map_err(|e| e.to_string())?;
+        //         }
+        //         DbMessage::SaveTrade(trade) => {
+        //             self.redis
+        //                 .push_message("db_queue", &DbMessage::SaveTrade(trade))
+        //                 .await
+        //                 .map_err(|e| e.to_string())?;
+        //         }
+        //         _ => {
+        //             self.redis
+        //                 .publish_message("responses", &msg)
+        //                 .await
+        //                 .map_err(|e| e.to_string())?;
+        //         }
+        //     }
+        // }
+
+        println!("match_with_book: remaing_quantitiy={}", remaining_quantity);
+
         Ok(remaining_quantity)
     }
 
@@ -863,6 +1028,10 @@ impl MatchingEngine {
         market_id: String,
         client_id: String,
     ) -> Result<Vec<Order>, String> {
+        println!(
+            "inside engine get open id called for : userId: {}, market_id: {}",
+            user_id, market_id
+        );
         let markets = self.markets.read().await;
         let (yes_book, no_book) = markets
             .get(&market_id)
@@ -881,6 +1050,8 @@ impl MatchingEngine {
             )
             .await
             .map_err(|e| e.to_string())?;
+
+        println!("printing open orders: {:?}", orders);
 
         Ok(orders)
     }

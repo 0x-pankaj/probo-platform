@@ -22,6 +22,7 @@ impl OrderBook {
     }
 
     pub fn add_order(&mut self, order: Order) {
+        println!("add order called");
         let price_cents = Self::price_to_cents(order.price);
         let orders = match order.order_type {
             OrderType::Buy => &mut self.bids,

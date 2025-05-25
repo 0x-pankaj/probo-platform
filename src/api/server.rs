@@ -8,7 +8,8 @@ use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use actix_web_actors::ws;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+use tokio::time::timeout;
 
 #[derive(Clone)]
 struct AppState {
@@ -78,7 +79,16 @@ async fn place_order(
         .push_message("engine_queue", &message)
         .await
         .unwrap();
-    HttpResponse::Ok().body("Order placed")
+
+    // Subscribe temporarily to get the response
+    let response = wait_for_response(&state.redis, &req.client_id).await;
+    match response {
+        Some(MessageToApi::OrderPlaced { order, .. }) => {
+            HttpResponse::Ok().json(serde_json::to_value(&order).unwrap())
+        }
+        Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
+        _ => HttpResponse::InternalServerError().body("No response received"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -120,7 +130,15 @@ async fn cancel_order(
         .push_message("engine_queue", &message)
         .await
         .unwrap();
-    HttpResponse::Ok().body("Order cancellation requested")
+
+    let response = wait_for_response(&state.redis, &req.client_id).await;
+    match response {
+        Some(MessageToApi::OrderCancelled { order_id, .. }) => {
+            HttpResponse::Ok().json(serde_json::json!({ "order_id": order_id }))
+        }
+        Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
+        _ => HttpResponse::InternalServerError().body("No response received"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -134,6 +152,7 @@ async fn get_open_orders(
     state: web::Data<Arc<AppState>>,
     req: web::Json<OpenOrdersRequest>,
 ) -> impl Responder {
+    println!("called open orders");
     let message = MessageFromApi::GetOpenOrders {
         user_id: req.user_id,
         market_id: req.market_id.clone(),
@@ -145,7 +164,15 @@ async fn get_open_orders(
         .push_message("engine_queue", &message)
         .await
         .unwrap();
-    HttpResponse::Ok().body("Open orders requested")
+
+    let response = wait_for_response(&state.redis, &req.client_id).await;
+    match response {
+        Some(MessageToApi::OpenOrders { orders, .. }) => {
+            HttpResponse::Ok().json(serde_json::to_value(&orders).unwrap())
+        }
+        Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
+        _ => HttpResponse::InternalServerError().body("No response received"),
+    }
 }
 
 #[derive(Deserialize)]
@@ -193,7 +220,46 @@ async fn create_market(
         .push_message("engine_queue", &message)
         .await
         .unwrap();
-    HttpResponse::Ok().body("Market creation requested")
+
+    let response = wait_for_response(&state.redis, &req.client_id).await;
+    match response {
+        Some(MessageToApi::MarketCreated { market_id, .. }) => {
+            HttpResponse::Ok().json(serde_json::json!({ "market_id": market_id }))
+        }
+        Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
+        _ => HttpResponse::InternalServerError().body("No response received"),
+    }
+}
+
+// Helper function to wait for a response from the "responses" channel
+async fn wait_for_response(redis: &RedisManager, client_id: &str) -> Option<MessageToApi> {
+    let mut pubsub = redis.subscribe("responses").await.unwrap();
+    let result = timeout(Duration::from_secs(5), pubsub.on_message().next()).await;
+    match result {
+        Ok(Some(msg)) => {
+            if let Ok(payload) = msg.get_payload::<String>() {
+                if let Ok(message) = serde_json::from_str::<MessageToApi>(&payload) {
+                    if matches_client_id(&message, client_id) {
+                        return Some(message);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn matches_client_id(message: &MessageToApi, client_id: &str) -> bool {
+    match message {
+        MessageToApi::OrderPlaced { client_id: cid, .. } => cid == client_id,
+        MessageToApi::OrderMatched { client_id: cid, .. } => cid == client_id,
+        MessageToApi::OrderCancelled { client_id: cid, .. } => cid == client_id,
+        MessageToApi::OpenOrders { client_id: cid, .. } => cid == client_id,
+        MessageToApi::MarketCreated { client_id: cid, .. } => cid == client_id,
+        MessageToApi::Error { client_id: cid, .. } => cid == client_id,
+        MessageToApi::Depth { client_id: cid, .. } => cid == client_id,
+    }
 }
 
 struct WsActor {
