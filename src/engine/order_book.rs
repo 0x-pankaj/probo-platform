@@ -68,24 +68,39 @@ impl OrderBook {
     }
 
     pub fn get_depth(&self) -> (Vec<(f64, u32)>, Vec<(f64, u32)>) {
-        let bids: Vec<(f64, u32)> = self
-            .bids
-            .iter()
-            .map(|(&price_cents, queue)| {
-                let price = price_cents as f64 / 100.0;
-                let quantity = queue.iter().map(|o| o.quantity).sum();
-                (price, quantity)
-            })
-            .collect();
-        let asks: Vec<(f64, u32)> = self
-            .asks
-            .iter()
-            .map(|(&price_cents, queue)| {
-                let price = price_cents as f64 / 100.0;
-                let quantity = queue.iter().map(|o| o.quantity).sum();
-                (price, quantity)
-            })
-            .collect();
+        let mut bids = Vec::new();
+        let mut asks = Vec::new();
+
+        for (&price_cents, queue) in self.bids.iter().rev() {
+            let total_quantity = queue.iter().map(|o| o.quantity).sum();
+            bids.push((price_cents as f64 / 100.0, total_quantity));
+        }
+
+        for (&price_cents, queue) in self.asks.iter() {
+            let total_quantity = queue.iter().map(|o| o.quantity).sum();
+            asks.push((price_cents as f64 / 100.0, total_quantity));
+        }
+
         (bids, asks)
+
+        // let bids: Vec<(f64, u32)> = self
+        //     .bids
+        //     .iter()
+        //     .map(|(&price_cents, queue)| {
+        //         let price = price_cents as f64 / 100.0;
+        //         let quantity = queue.iter().map(|o| o.quantity).sum();
+        //         (price, quantity)
+        //     })
+        //     .collect();
+        // let asks: Vec<(f64, u32)> = self
+        //     .asks
+        //     .iter()
+        //     .map(|(&price_cents, queue)| {
+        //         let price = price_cents as f64 / 100.0;
+        //         let quantity = queue.iter().map(|o| o.quantity).sum();
+        //         (price, quantity)
+        //     })
+        //     .collect();
+        // (bids, asks)
     }
 }

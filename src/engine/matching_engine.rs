@@ -6,6 +6,7 @@ use crate::{
         db::DbMessage,
         market::Market,
         order::{OptionType, Order, OrderType, Trade},
+        ws::WsMessage,
     },
 };
 use std::collections::HashMap;
@@ -71,21 +72,6 @@ impl MatchingEngine {
         let order_id = *id;
         *id += 1;
         order_id
-    }
-
-    pub async fn generate_market(&self) {
-        let mut markets = self.markets.write().await;
-        let market_id = String::from("market_1");
-
-        markets.insert(
-            market_id,
-            (
-                OrderBook::new(OptionType::Yes),
-                OrderBook::new(OptionType::No),
-            ),
-        );
-
-        // Market::new(market_id.clone(), question);
     }
 
     pub async fn place_order(
@@ -180,6 +166,10 @@ impl MatchingEngine {
                     no_book.add_order(order.clone());
                 }
 
+                self.redis
+                    .push_message("db_queue", &DbMessage::SaveOrder(order.clone()))
+                    .await
+                    .map_err(|e| e.to_string())?;
                 no_book.get_depth()
             }
         };
@@ -213,7 +203,7 @@ impl MatchingEngine {
 
         self.redis
             .publish_message(
-                "market_updates",
+                &format!("market_updates_{}", market_id),
                 &crate::types::ws::WsMessage::Depth {
                     market_id: market_id.clone(),
                     bids: bids.clone(),
@@ -289,17 +279,17 @@ impl MatchingEngine {
         };
 
         let counter_price = 10.0 - order.price;
-        remaining_quantity = self
-            .match_with_counter_book(
-                counter_book,
-                order,
-                remaining_quantity,
-                counter_price,
-                &mut trades,
-                &client_id,
-            )
-            .await?;
-
+        // remaining_quantity = self
+        //     .match_with_counter_book(
+        //         counter_book,
+        //         order,
+        //         remaining_quantity,
+        //         counter_price,
+        //         &mut trades,
+        //         &client_id,
+        //     )
+        //     .await?;
+        println!("before entering in match with counter book same type");
         self.match_with_counter_book_same_type(
             counter_book,
             order,
@@ -316,7 +306,7 @@ impl MatchingEngine {
             let last_price = trades.last().unwrap().price;
             self.redis
                 .publish_message(
-                    "market_updates",
+                    &format!("market_updates_{}", market_id),
                     &crate::types::ws::WsMessage::Price {
                         market_id: market_id.to_string(),
                         option: order.option,
@@ -429,6 +419,16 @@ impl MatchingEngine {
                                     .await
                                     .map_err(|e| e.to_string())?;
 
+                                self.redis
+                                    .publish_message(
+                                        &format!("market_updates_{}", order.market_id),
+                                        &WsMessage::Trade {
+                                            trade: trade.clone(),
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string());
+
                                 remaining_quantity -= matched_quantity;
                                 if ask.quantity > matched_quantity {
                                     let mut new_ask = ask.clone();
@@ -540,6 +540,16 @@ impl MatchingEngine {
                                     .await
                                     .map_err(|e| e.to_string())?;
 
+                                self.redis
+                                    .publish_message(
+                                        &format!("market_updates_{}", order.market_id),
+                                        &WsMessage::Trade {
+                                            trade: trade.clone(),
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string());
+
                                 remaining_quantity -= matched_quantity;
                                 if bid.quantity > matched_quantity {
                                     let mut new_bid = bid.clone();
@@ -594,189 +604,189 @@ impl MatchingEngine {
         Ok(remaining_quantity)
     }
 
-    async fn match_with_counter_book(
-        &self,
-        counter_book: &mut OrderBook,
-        order: &mut Order,
-        mut remaining_quantity: u32,
-        counter_price: f64,
-        trades: &mut Vec<Trade>,
-        client_id: &str,
-    ) -> Result<u32, String> {
-        match order.order_type {
-            OrderType::Buy => {
-                while remaining_quantity > 0 {
-                    if let Some((&ask_price_cents, asks)) = counter_book.asks.iter_mut().next() {
-                        let ask_price = ask_price_cents as f64 / 100.0;
-                        if ask_price <= counter_price {
-                            if let Some(ask) = asks.pop_front() {
-                                let matched_quantity = remaining_quantity.min(ask.quantity);
-                                let trade = Trade {
-                                    buy_order_id: order.id,
-                                    sell_order_id: ask.id,
-                                    market_id: order.market_id.clone(),
-                                    option: order.option,
-                                    price: order.price,
-                                    quantity: matched_quantity,
-                                    timestamp: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs(),
-                                };
-                                trades.push(trade.clone());
+    // async fn match_with_counter_book(
+    //     &self,
+    //     counter_book: &mut OrderBook,
+    //     order: &mut Order,
+    //     mut remaining_quantity: u32,
+    //     counter_price: f64,
+    //     trades: &mut Vec<Trade>,
+    //     client_id: &str,
+    // ) -> Result<u32, String> {
+    //     match order.order_type {
+    //         OrderType::Buy => {
+    //             while remaining_quantity > 0 {
+    //                 if let Some((&ask_price_cents, asks)) = counter_book.asks.iter_mut().next() {
+    //                     let ask_price = ask_price_cents as f64 / 100.0;
+    //                     if ask_price <= counter_price {
+    //                         if let Some(ask) = asks.pop_front() {
+    //                             let matched_quantity = remaining_quantity.min(ask.quantity);
+    //                             let trade = Trade {
+    //                                 buy_order_id: order.id,
+    //                                 sell_order_id: ask.id,
+    //                                 market_id: order.market_id.clone(),
+    //                                 option: order.option,
+    //                                 price: order.price,
+    //                                 quantity: matched_quantity,
+    //                                 timestamp: std::time::SystemTime::now()
+    //                                     .duration_since(std::time::UNIX_EPOCH)
+    //                                     .unwrap()
+    //                                     .as_secs(),
+    //                             };
+    //                             trades.push(trade.clone());
 
-                                let amount = order.price * matched_quantity as f64;
-                                self.balances
-                                    .deduct_balance(order.user_id, amount, self.commission_rate)
-                                    .await?;
-                                self.balances.credit_balance(ask.user_id, amount).await?;
-                                self.redis
-                                    .push_message(
-                                        "db_queue",
-                                        &DbMessage::UpdateBalance {
-                                            user_id: order.user_id,
-                                            balance: self
-                                                .balances
-                                                .get_balance(order.user_id)
-                                                .await
-                                                .0,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                self.redis
-                                    .push_message(
-                                        "db_queue",
-                                        &DbMessage::UpdateBalance {
-                                            user_id: ask.user_id,
-                                            balance: self.balances.get_balance(ask.user_id).await.0,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                self.redis
-                                    .push_message("db_queue", &DbMessage::SaveTrade(trade.clone()))
-                                    .await
-                                    .map_err(|e| e.to_string())?;
+    //                             let amount = order.price * matched_quantity as f64;
+    //                             self.balances
+    //                                 .deduct_balance(order.user_id, amount, self.commission_rate)
+    //                                 .await?;
+    //                             self.balances.credit_balance(ask.user_id, amount).await?;
+    //                             self.redis
+    //                                 .push_message(
+    //                                     "db_queue",
+    //                                     &DbMessage::UpdateBalance {
+    //                                         user_id: order.user_id,
+    //                                         balance: self
+    //                                             .balances
+    //                                             .get_balance(order.user_id)
+    //                                             .await
+    //                                             .0,
+    //                                     },
+    //                                 )
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
+    //                             self.redis
+    //                                 .push_message(
+    //                                     "db_queue",
+    //                                     &DbMessage::UpdateBalance {
+    //                                         user_id: ask.user_id,
+    //                                         balance: self.balances.get_balance(ask.user_id).await.0,
+    //                                     },
+    //                                 )
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
+    //                             self.redis
+    //                                 .push_message("db_queue", &DbMessage::SaveTrade(trade.clone()))
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
 
-                                self.redis
-                                    .publish_message(
-                                        "responses",
-                                        &MessageToApi::OrderMatched {
-                                            trade: trade.clone(),
-                                            client_id: client_id.to_string(),
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
+    //                             self.redis
+    //                                 .publish_message(
+    //                                     "responses",
+    //                                     &MessageToApi::OrderMatched {
+    //                                         trade: trade.clone(),
+    //                                         client_id: client_id.to_string(),
+    //                                     },
+    //                                 )
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
 
-                                remaining_quantity -= matched_quantity;
-                                if ask.quantity > matched_quantity {
-                                    let mut new_ask = ask.clone();
-                                    new_ask.quantity -= matched_quantity;
-                                    asks.push_front(new_ask);
-                                }
-                                if asks.is_empty() {
-                                    counter_book.asks.remove(&ask_price_cents);
-                                }
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-            OrderType::Sell => {
-                while remaining_quantity > 0 {
-                    if let Some((&bid_price_cents, bids)) =
-                        counter_book.bids.iter_mut().rev().next()
-                    {
-                        let bid_price = bid_price_cents as f64 / 100.0;
-                        if bid_price >= counter_price {
-                            if let Some(bid) = bids.pop_front() {
-                                let matched_quantity = remaining_quantity.min(bid.quantity);
-                                let trade = Trade {
-                                    buy_order_id: bid.id,
-                                    sell_order_id: order.id,
-                                    market_id: order.market_id.clone(),
-                                    option: order.option,
-                                    price: order.price,
-                                    quantity: matched_quantity,
-                                    timestamp: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs(),
-                                };
-                                trades.push(trade.clone());
+    //                             remaining_quantity -= matched_quantity;
+    //                             if ask.quantity > matched_quantity {
+    //                                 let mut new_ask = ask.clone();
+    //                                 new_ask.quantity -= matched_quantity;
+    //                                 asks.push_front(new_ask);
+    //                             }
+    //                             if asks.is_empty() {
+    //                                 counter_book.asks.remove(&ask_price_cents);
+    //                             }
+    //                         }
+    //                     } else {
+    //                         break;
+    //                     }
+    //                 } else {
+    //                     break;
+    //                 }
+    //             }
+    //         }
+    //         OrderType::Sell => {
+    //             while remaining_quantity > 0 {
+    //                 if let Some((&bid_price_cents, bids)) =
+    //                     counter_book.bids.iter_mut().rev().next()
+    //                 {
+    //                     let bid_price = bid_price_cents as f64 / 100.0;
+    //                     if bid_price >= counter_price {
+    //                         if let Some(bid) = bids.pop_front() {
+    //                             let matched_quantity = remaining_quantity.min(bid.quantity);
+    //                             let trade = Trade {
+    //                                 buy_order_id: bid.id,
+    //                                 sell_order_id: order.id,
+    //                                 market_id: order.market_id.clone(),
+    //                                 option: order.option,
+    //                                 price: order.price,
+    //                                 quantity: matched_quantity,
+    //                                 timestamp: std::time::SystemTime::now()
+    //                                     .duration_since(std::time::UNIX_EPOCH)
+    //                                     .unwrap()
+    //                                     .as_secs(),
+    //                             };
+    //                             trades.push(trade.clone());
 
-                                let amount = order.price * matched_quantity as f64;
-                                self.balances
-                                    .deduct_balance(bid.user_id, amount, self.commission_rate)
-                                    .await?;
-                                self.balances.credit_balance(order.user_id, amount).await?;
-                                self.redis
-                                    .push_message(
-                                        "db_queue",
-                                        &DbMessage::UpdateBalance {
-                                            user_id: bid.user_id,
-                                            balance: self.balances.get_balance(bid.user_id).await.0,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                self.redis
-                                    .push_message(
-                                        "db_queue",
-                                        &DbMessage::UpdateBalance {
-                                            user_id: order.user_id,
-                                            balance: self
-                                                .balances
-                                                .get_balance(order.user_id)
-                                                .await
-                                                .0,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                self.redis
-                                    .push_message("db_queue", &DbMessage::SaveTrade(trade.clone()))
-                                    .await
-                                    .map_err(|e| e.to_string())?;
+    //                             let amount = order.price * matched_quantity as f64;
+    //                             self.balances
+    //                                 .deduct_balance(bid.user_id, amount, self.commission_rate)
+    //                                 .await?;
+    //                             self.balances.credit_balance(order.user_id, amount).await?;
+    //                             self.redis
+    //                                 .push_message(
+    //                                     "db_queue",
+    //                                     &DbMessage::UpdateBalance {
+    //                                         user_id: bid.user_id,
+    //                                         balance: self.balances.get_balance(bid.user_id).await.0,
+    //                                     },
+    //                                 )
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
+    //                             self.redis
+    //                                 .push_message(
+    //                                     "db_queue",
+    //                                     &DbMessage::UpdateBalance {
+    //                                         user_id: order.user_id,
+    //                                         balance: self
+    //                                             .balances
+    //                                             .get_balance(order.user_id)
+    //                                             .await
+    //                                             .0,
+    //                                     },
+    //                                 )
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
+    //                             self.redis
+    //                                 .push_message("db_queue", &DbMessage::SaveTrade(trade.clone()))
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
 
-                                self.redis
-                                    .publish_message(
-                                        "responses",
-                                        &MessageToApi::OrderMatched {
-                                            trade: trade.clone(),
-                                            client_id: client_id.to_string(),
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
+    //                             self.redis
+    //                                 .publish_message(
+    //                                     "responses",
+    //                                     &MessageToApi::OrderMatched {
+    //                                         trade: trade.clone(),
+    //                                         client_id: client_id.to_string(),
+    //                                     },
+    //                                 )
+    //                                 .await
+    //                                 .map_err(|e| e.to_string())?;
 
-                                remaining_quantity -= matched_quantity;
-                                if bid.quantity > matched_quantity {
-                                    let mut new_bid = bid.clone();
-                                    new_bid.quantity -= matched_quantity;
-                                    bids.push_front(new_bid);
-                                }
-                                if bids.is_empty() {
-                                    counter_book.bids.remove(&bid_price_cents);
-                                }
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(remaining_quantity)
-    }
+    //                             remaining_quantity -= matched_quantity;
+    //                             if bid.quantity > matched_quantity {
+    //                                 let mut new_bid = bid.clone();
+    //                                 new_bid.quantity -= matched_quantity;
+    //                                 bids.push_front(new_bid);
+    //                             }
+    //                             if bids.is_empty() {
+    //                                 counter_book.bids.remove(&bid_price_cents);
+    //                             }
+    //                         }
+    //                     } else {
+    //                         break;
+    //                     }
+    //                 } else {
+    //                     break;
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     Ok(remaining_quantity)
+    // }
 
     async fn match_with_counter_book_same_type(
         &self,
@@ -789,6 +799,7 @@ impl MatchingEngine {
     ) -> Result<u32, String> {
         match order.order_type {
             OrderType::Buy => {
+                println!("hitted match with count book same type inside");
                 while remaining_quantity > 0 {
                     if let Some((&bid_price_cents, bids)) =
                         counter_book.bids.iter_mut().rev().next()
@@ -810,7 +821,7 @@ impl MatchingEngine {
                                         .as_secs(),
                                 };
                                 trades.push(trade.clone());
-
+                                println!("price : {}", order.price);
                                 let amount = order.price * matched_quantity as f64;
                                 self.balances
                                     .deduct_balance(order.user_id, amount, self.commission_rate)
@@ -856,6 +867,16 @@ impl MatchingEngine {
                                     .await
                                     .map_err(|e| e.to_string())?;
 
+                                self.redis
+                                    .publish_message(
+                                        &format!("market_updates_{}", order.market_id),
+                                        &WsMessage::Trade {
+                                            trade: trade.clone(),
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string());
+
                                 remaining_quantity -= matched_quantity;
                                 if bid.quantity > matched_quantity {
                                     let mut new_bid = bid.clone();
@@ -875,88 +896,7 @@ impl MatchingEngine {
                 }
             }
             OrderType::Sell => {
-                while remaining_quantity > 0 {
-                    if let Some((&ask_price_cents, asks)) = counter_book.asks.iter_mut().next() {
-                        let ask_price = ask_price_cents as f64 / 100.0;
-                        if ask_price <= counter_price {
-                            if let Some(ask) = asks.pop_front() {
-                                let matched_quantity = remaining_quantity.min(ask.quantity);
-                                let trade = Trade {
-                                    buy_order_id: ask.id,
-                                    sell_order_id: order.id,
-                                    market_id: order.market_id.clone(),
-                                    option: order.option,
-                                    price: order.price,
-                                    quantity: matched_quantity,
-                                    timestamp: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs(),
-                                };
-                                trades.push(trade.clone());
-
-                                let amount = order.price * matched_quantity as f64;
-                                self.balances
-                                    .deduct_balance(ask.user_id, amount, self.commission_rate)
-                                    .await?;
-                                self.balances.credit_balance(order.user_id, amount).await?;
-                                self.redis
-                                    .push_message(
-                                        "db_queue",
-                                        &DbMessage::UpdateBalance {
-                                            user_id: ask.user_id,
-                                            balance: self.balances.get_balance(ask.user_id).await.0,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                self.redis
-                                    .push_message(
-                                        "db_queue",
-                                        &DbMessage::UpdateBalance {
-                                            user_id: order.user_id,
-                                            balance: self
-                                                .balances
-                                                .get_balance(order.user_id)
-                                                .await
-                                                .0,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                self.redis
-                                    .push_message("db_queue", &DbMessage::SaveTrade(trade.clone()))
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-
-                                self.redis
-                                    .publish_message(
-                                        "responses",
-                                        &MessageToApi::OrderMatched {
-                                            trade: trade.clone(),
-                                            client_id: client_id.to_string(),
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-
-                                remaining_quantity -= matched_quantity;
-                                if ask.quantity > matched_quantity {
-                                    let mut new_ask = ask.clone();
-                                    new_ask.quantity -= matched_quantity;
-                                    asks.push_front(new_ask);
-                                }
-                                if asks.is_empty() {
-                                    counter_book.asks.remove(&ask_price_cents);
-                                }
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
+                println!("hitted here while matching");
             }
         }
         Ok(remaining_quantity)

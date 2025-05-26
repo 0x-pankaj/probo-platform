@@ -32,10 +32,24 @@ pub async fn run_api_server(redis: RedisManager, addr: &str) -> std::io::Result<
             .route("/depth", web::post().to(get_depth))
             .route("/market", web::post().to(create_market))
             .route("/ws", web::get().to(ws_index))
+            .route("/events", web::get().to(get_events))
     })
     .bind(addr)?
     .run()
     .await
+}
+
+async fn get_events(state: web::Data<Arc<AppState>>) -> impl Responder {
+    let mut markets = Vec::new();
+    match state.redis.pop_message::<Vec<String>>("markets_list").await {
+        Ok(Some(market_ids)) => {
+            for market_id in market_ids {
+                markets.push(serde_json::json!({ "market_id": market_id }));
+            }
+            HttpResponse::Ok().json(markets)
+        }
+        _ => HttpResponse::Ok().json(Vec::<String>::new()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -85,6 +99,9 @@ async fn place_order(
     match response {
         Some(MessageToApi::OrderPlaced { order, .. }) => {
             HttpResponse::Ok().json(serde_json::to_value(&order).unwrap())
+        }
+        Some(MessageToApi::OrderMatched { trade, .. }) => {
+            HttpResponse::Ok().json(serde_json::to_value(&trade).unwrap())
         }
         Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
         _ => HttpResponse::InternalServerError().body("No response received"),
@@ -185,6 +202,7 @@ async fn get_depth(
     state: web::Data<Arc<AppState>>,
     req: web::Json<DepthRequest>,
 ) -> impl Responder {
+    println!("finding depth hitted:");
     let message = MessageFromApi::GetDepth {
         market_id: req.market_id.clone(),
         client_id: req.client_id.clone(),

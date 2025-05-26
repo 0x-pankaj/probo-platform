@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::order::Trade;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum WsMessage {
     Price {
@@ -11,5 +13,8 @@ pub enum WsMessage {
         market_id: String,
         bids: Vec<(f64, u32)>,
         asks: Vec<(f64, u32)>,
+    },
+    Trade {
+        trade: Trade,
     },
 }
