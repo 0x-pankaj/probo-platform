@@ -57,8 +57,10 @@ pub enum MessageToApi {
     },
     Depth {
         market_id: String,
-        bids: Vec<(f64, u32)>,
-        asks: Vec<(f64, u32)>,
+        yes_bids: Vec<(f64, u32)>,
+        yes_asks: Vec<(f64, u32)>,
+        no_bids: Vec<(f64, u32)>,
+        no_asks: Vec<(f64, u32)>,
         client_id: String,
     },
     MarketCreated {

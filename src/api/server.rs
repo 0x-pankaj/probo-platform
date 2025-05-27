@@ -140,7 +140,7 @@ async fn cancel_order(
         price: req.price,
         order_id: req.order_id,
         client_id: req.client_id.clone(),
-    };
+   };
 
     state
         .redis
