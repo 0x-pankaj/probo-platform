@@ -140,7 +140,7 @@ async fn cancel_order(
         price: req.price,
         order_id: req.order_id,
         client_id: req.client_id.clone(),
-   };
+    };
 
     state
         .redis
@@ -213,7 +213,24 @@ async fn get_depth(
         .push_message("engine_queue", &message)
         .await
         .unwrap();
-    HttpResponse::Ok().body("Depth requested")
+    // HttpResponse::Ok().body("Depth requested")
+    let response = wait_for_response(&state.redis, &req.client_id).await;
+    match response {
+        Some(MessageToApi::Depth {
+            market_id,
+            yes_bids,
+            yes_asks,
+            no_bids,
+            no_asks,
+            client_id,
+            ..
+        }) => HttpResponse::Ok().json(
+            serde_json::to_value(&(market_id, yes_bids, yes_asks, no_bids, no_asks, client_id))
+                .unwrap(),
+        ),
+        Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
+        _ => HttpResponse::InternalServerError().body("No response received"),
+    }
 }
 
 #[derive(Deserialize)]
