@@ -10,6 +10,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use std::{sync::Arc, time::Duration};
 use tokio::time::timeout;
+use uuid::Uuid;
 
 #[derive(Clone)]
 struct AppState {
@@ -170,25 +171,67 @@ async fn get_open_orders(
     req: web::Json<OpenOrdersRequest>,
 ) -> impl Responder {
     println!("called open orders");
+
+    // Generate a unique client_id server-side
+    let client_id = Uuid::new_v4().to_string();
+    println!("Generated client_id: {}", client_id);
+
+    // Subscribe to the responses channel *before* pushing the message
+    let mut pubsub = match state.redis.subscribe("responses").await {
+        Ok(pubsub) => pubsub,
+        Err(e) => {
+            tracing::error!("Failed to subscribe to responses: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to subscribe to responses");
+        }
+    };
+
+    // Create the message to send to the engine
     let message = MessageFromApi::GetOpenOrders {
         user_id: req.user_id,
         market_id: req.market_id.clone(),
-        client_id: req.client_id.clone(),
+        client_id: client_id.clone(),
     };
 
-    state
-        .redis
-        .push_message("engine_queue", &message)
-        .await
-        .unwrap();
+    // Push the message to the engine queue *after* subscribing
+    if let Err(e) = state.redis.push_message("engine_queue", &message).await {
+        tracing::error!("Failed to push message to engine_queue: {}", e);
+        return HttpResponse::InternalServerError().body("Failed to send open orders request");
+    }
+    println!("after sending to queue");
 
-    let response = wait_for_response(&state.redis, &req.client_id).await;
+    // Wait for the response with a timeout
+    let response = timeout(Duration::from_secs(5), pubsub.on_message().next()).await;
     match response {
-        Some(MessageToApi::OpenOrders { orders, .. }) => {
-            HttpResponse::Ok().json(serde_json::to_value(&orders).unwrap())
+        Ok(Some(msg)) => {
+            if let Ok(payload) = msg.get_payload::<String>() {
+                if let Ok(message) = serde_json::from_str::<MessageToApi>(&payload) {
+                    if matches_client_id(&message, &client_id) {
+                        match message {
+                            MessageToApi::OpenOrders { orders, .. } => {
+                                return HttpResponse::Ok()
+                                    .json(serde_json::to_value(&orders).unwrap());
+                            }
+                            MessageToApi::Error { message, .. } => {
+                                return HttpResponse::BadRequest().body(message);
+                            }
+                            _ => {
+                                return HttpResponse::InternalServerError()
+                                    .body("Unexpected response type");
+                            }
+                        }
+                    }
+                }
+            }
+            HttpResponse::InternalServerError().body("Invalid response format")
         }
-        Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
-        _ => HttpResponse::InternalServerError().body("No response received"),
+        Ok(None) => {
+            tracing::warn!("No message received for client_id: {}", client_id);
+            HttpResponse::InternalServerError().body("No response received")
+        }
+        Err(_) => {
+            tracing::warn!("Timeout waiting for response for client_id: {}", client_id);
+            HttpResponse::InternalServerError().body("Response timeout")
+        }
     }
 }
 
@@ -203,32 +246,66 @@ async fn get_depth(
     req: web::Json<DepthRequest>,
 ) -> impl Responder {
     println!("finding depth hitted:");
+
+    // Subscribe to the responses channel *before* pushing the message
+    let mut pubsub = match state.redis.subscribe("responses").await {
+        Ok(pubsub) => pubsub,
+        Err(e) => {
+            tracing::error!("Failed to subscribe to responses: {}", e);
+            return HttpResponse::InternalServerError().body("Failed to subscribe to responses");
+        }
+    };
+
+    // Create the message to send to the engine
     let message = MessageFromApi::GetDepth {
         market_id: req.market_id.clone(),
         client_id: req.client_id.clone(),
     };
 
-    state
-        .redis
-        .push_message("engine_queue", &message)
-        .await
-        .unwrap();
-    // HttpResponse::Ok().body("Depth requested")
-    let response = wait_for_response(&state.redis, &req.client_id).await;
+    // Push the message to the engine queue *after* subscribing
+    if let Err(e) = state.redis.push_message("engine_queue", &message).await {
+        tracing::error!("Failed to push message to engine_queue: {}", e);
+        return HttpResponse::InternalServerError().body("Failed to send depth request");
+    }
+    println!("after sending to queue");
+
+    // Wait for the response with a timeout
+    let response = timeout(Duration::from_secs(5), pubsub.on_message().next()).await;
     match response {
-        Some(MessageToApi::Depth {
-            market_id,
-            yes_bids,
-            yes_asks,
-            no_bids,
-            no_asks,
-            client_id,
-            ..
-        }) => HttpResponse::Ok().json(
-            serde_json::to_value(&(market_id, yes_bids, yes_asks, no_bids, no_asks, client_id))
-                .unwrap(),
-        ),
-        Some(MessageToApi::Error { message, .. }) => HttpResponse::BadRequest().body(message),
+        Ok(Some(msg)) => {
+            if let Ok(payload) = msg.get_payload::<String>() {
+                if let Ok(message) = serde_json::from_str::<MessageToApi>(&payload) {
+                    if matches_client_id(&message, &req.client_id) {
+                        match message {
+                            MessageToApi::Depth {
+                                market_id,
+                                yes_bids,
+                                yes_asks,
+                                no_bids,
+                                no_asks,
+                                client_id,
+                                ..
+                            } => {
+                                return HttpResponse::Ok().json(
+                                    serde_json::to_value(&(
+                                        market_id, yes_bids, yes_asks, no_bids, no_asks, client_id,
+                                    ))
+                                    .unwrap(),
+                                );
+                            }
+                            MessageToApi::Error { message, .. } => {
+                                return HttpResponse::BadRequest().body(message);
+                            }
+                            _ => {
+                                return HttpResponse::InternalServerError()
+                                    .body("Unexpected response type");
+                            }
+                        }
+                    }
+                }
+            }
+            HttpResponse::InternalServerError().body("Invalid response format")
+        }
         _ => HttpResponse::InternalServerError().body("No response received"),
     }
 }

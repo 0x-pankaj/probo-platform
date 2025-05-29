@@ -1058,6 +1058,8 @@ impl MatchingEngine {
         let (yes_bids, yes_asks) = yes_book.get_depth();
         let (no_bids, no_asks) = no_book.get_depth();
 
+        println!("YEs: depth: {:?} , no depth: {:?}", yes_bids, no_bids);
+
         self.redis
             .publish_message(
                 "responses",

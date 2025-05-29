@@ -99,19 +99,3 @@ impl EngineProcessor {
         Ok(())
     }
 }
-
-// impl Actor for EngineProcessor {
-//     type Context = Context<Self>;
-// }
-
-// #[derive(Message)]
-// #[rtype(result = "Result<(), String>")]
-// struct ProcessMessage(MessageFromApi);
-
-// impl Handler<ProcessMessage> for EngineProcessor {
-//     type Result = Result<(), String>;
-
-//     fn handle(&mut self, msg: ProcessMessage, _ctx: &mut Context<Self>) -> Self::Result {
-//         futures::executor::block_on(self.process(msg.0))
-//     }
-// }
