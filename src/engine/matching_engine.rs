@@ -109,71 +109,75 @@ impl MatchingEngine {
         );
         println!("order: {:?}", order);
 
-        //Acquiring lock only for accessing order book
-        let (mut yes_book, mut no_book) = {
+        // Acquire write lock and perform all operations within the scope
+        let (trades, bids, asks) = {
             let mut markets = self.markets.write().await;
             println!("Acquired markets lock in place_order");
-            let (yes, no) = markets
-                .remove(&market_id)
+            let (yes_book, no_book) = markets
+                .get_mut(&market_id)
                 .ok_or("Market not found".to_string())?;
-            (yes, no)
+
+            // Running matching logic without moving yes_book and no_book
+            let trades = self
+                .match_order(
+                    &mut order,
+                    &market_id,
+                    yes_book, // Pass mutable reference without moving
+                    no_book,  // Pass mutable reference without moving
+                    client_id.clone(),
+                )
+                .await?;
+            println!("matched_order: {:?}", trades);
+            println!("remaining order quantity: {:?}", order.quantity);
+
+            // Handle order placement based on option type
+            let (bids, asks) = match option {
+                OptionType::Yes => {
+                    if order.quantity == 0 {
+                        yes_book.remove_order(order_type, price, order_id);
+                    } else {
+                        yes_book.add_order(order.clone());
+                    }
+
+                    // Save order if quantity remains
+                    if order.quantity > 0 {
+                        self.redis
+                            .push_message("db_queue", &DbMessage::SaveOrder(order.clone()))
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    }
+                    yes_book.get_depth()
+                }
+                OptionType::No => {
+                    if order.quantity == 0 {
+                        no_book.remove_order(order_type, price, order_id);
+                    } else {
+                        no_book.add_order(order.clone());
+                    }
+
+                    // Save order if quantity remains
+                    if order.quantity > 0 {
+                        self.redis
+                            .push_message("db_queue", &DbMessage::SaveOrder(order.clone()))
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    }
+                    no_book.get_depth()
+                }
+            };
+
+            println!(
+                "Placed order: {:?}",
+                match option {
+                    OptionType::Yes => yes_book,
+                    OptionType::No => no_book,
+                }
+            );
+
+            (trades, bids, asks)
         };
 
-        //running matching logic
-        let trades = self
-            .match_order(
-                &mut order,
-                &market_id,
-                &mut yes_book,
-                &mut no_book,
-                client_id.clone(),
-            )
-            .await?;
-        println!("matched_order: {:?} ", trades);
-        println!("ramaining order quantity: {:?}", order.quantity);
-
-        let book = match option {
-            OptionType::Yes => &mut yes_book,
-            OptionType::No => &mut no_book,
-        };
-        println!("placed Order: {:?}", book);
-        //handeling ordeer placement based on option type
-        let (bids, asks) = match option {
-            OptionType::Yes => {
-                if order.quantity == 0 {
-                    yes_book.remove_order(order_type, price, order_id);
-                } else {
-                    yes_book.add_order(order.clone());
-                }
-
-                //saving order if quantity remains
-                if order.quantity > 0 {
-                    self.redis
-                        .push_message("db_queue", &DbMessage::SaveOrder(order.clone()))
-                        .await
-                        .map_err(|e| e.to_string())?;
-                }
-                yes_book.get_depth()
-            }
-            OptionType::No => {
-                if order.quantity == 0 {
-                    no_book.remove_order(order_type, price, order_id);
-                } else {
-                    no_book.add_order(order.clone());
-                }
-
-                no_book.get_depth()
-            }
-        };
-
-        println!(
-            "Placed order: {:?}",
-            match option {
-                OptionType::Yes => &yes_book,
-                OptionType::No => &no_book,
-            }
-        );
-
+        // Publish order placement response
         self.redis
             .publish_message(
                 "responses",
@@ -185,14 +189,7 @@ impl MatchingEngine {
             .await
             .map_err(|e| e.to_string())?;
 
-        //updating market with modified orderbook
-        {
-            let mut markets = self.markets.write().await;
-            println!("Acquired markets lock to update order books");
-            markets.insert(market_id.clone(), (yes_book, no_book));
-            println!("Released markets lock after updating order books");
-        }
-
+        // Publish market depth update
         self.redis
             .publish_message(
                 "market_updates",
@@ -204,19 +201,6 @@ impl MatchingEngine {
             )
             .await
             .map_err(|e| e.to_string())?;
-
-        // self.redis
-        //     .publish_message(
-        //         "responses",
-        //         &MessageToApi::Depth {
-        //             market_id,
-        //             bids,
-        //             asks,
-        //             client_id: client_id.clone(),
-        //         },
-        //     )
-        //     .await
-        //     .map_err(|e| e.to_string())?;
 
         Ok((order, trades))
     }

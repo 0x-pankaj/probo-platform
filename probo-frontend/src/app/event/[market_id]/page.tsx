@@ -26,7 +26,7 @@ import { useUser } from "@/contexts/UserContext";
 import { toast } from "sonner";
 import Navbar from "@/components/Navbar";
 import UserSetup from "@/components/UserSetup";
-import { ArrowLeft, TrendingUp, TrendingDown } from "lucide-react";
+import { ArrowLeft, TrendingUp, TrendingDown, RefreshCw } from "lucide-react";
 import Link from "next/link";
 
 interface DepthData {
@@ -64,6 +64,7 @@ export default function EventPage({
   const [price, setPrice] = useState("");
   const [quantity, setQuantity] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
   const { userId, clientId, isAuthenticated } = useUser();
 
   const fetchDepth = async () => {
@@ -104,21 +105,64 @@ export default function EventPage({
   };
 
   const fetchOpenOrders = async () => {
+    if (!userId || !clientId) {
+      console.warn("Missing userId or clientId for fetching open orders");
+      return;
+    }
+
     try {
+      setIsRefreshingOrders(true);
+
+      // Parse userId to ensure it's a valid number
+      const parsedUserId = parseInt(userId);
+      if (isNaN(parsedUserId)) {
+        throw new Error("Invalid user ID");
+      }
+
       const response = await axios.post("http://localhost:8000/open_orders", {
-        user_id: Number.parseInt(userId!),
+        user_id: parsedUserId,
         market_id: resolvedParams.market_id,
         client_id: clientId,
       });
 
       console.log("Open orders response:", response.data);
-      setOpenOrders(response.data || []);
+
+      // Ensure the response data is an array
+      if (Array.isArray(response.data)) {
+        setOpenOrders(response.data);
+      } else {
+        console.warn("Open orders response is not an array:", response.data);
+        setOpenOrders([]);
+      }
     } catch (error) {
       console.error("Failed to fetch open orders:", error);
       if (axios.isAxiosError(error)) {
         console.error("Axios error details:", error.response?.data);
+        console.error("Axios error status:", error.response?.status);
+        console.error("Axios error headers:", error.response?.headers);
+
+        // Handle specific error cases
+        if (error.response?.status === 404) {
+          console.log("No open orders found for this market");
+          setOpenOrders([]);
+        } else if (error.response?.status === 400) {
+          console.error("Bad request - check request parameters");
+        }
       }
+
+      // Don't show error toast for empty results
+      if (!axios.isAxiosError(error) || error.response?.status !== 404) {
+        toast.error("Failed to fetch open orders");
+      }
+    } finally {
+      setIsRefreshingOrders(false);
     }
+  };
+
+  // Manual refresh function for open orders
+  const handleRefreshOrders = async () => {
+    await fetchOpenOrders();
+    toast.success("Open orders refreshed");
   };
 
   useEffect(() => {
@@ -129,13 +173,13 @@ export default function EventPage({
         userId,
       });
 
+      // Initial fetch
       fetchDepth();
       fetchOpenOrders();
 
-      // Refresh data every 10 seconds
+      // Only refresh depth data every 10 seconds, not open orders
       const interval = setInterval(() => {
         fetchDepth();
-        fetchOpenOrders();
       }, 10000);
 
       return () => clearInterval(interval);
@@ -147,21 +191,33 @@ export default function EventPage({
     setIsLoading(true);
 
     try {
+      // Parse and validate inputs
+      const parsedUserId = parseInt(userId!);
+      const parsedPrice = parseFloat(price);
+      const parsedQuantity = parseInt(quantity);
+
+      if (isNaN(parsedUserId) || isNaN(parsedPrice) || isNaN(parsedQuantity)) {
+        throw new Error("Invalid input values");
+      }
+
       const response = await axios.post("http://localhost:8000/order", {
-        user_id: Number.parseInt(userId!),
+        user_id: parsedUserId,
         option: option,
         order_type: orderType,
-        price: Number.parseFloat(price),
-        quantity: Number.parseInt(quantity),
+        price: parsedPrice,
+        quantity: parsedQuantity,
         client_id: clientId,
         market_id: resolvedParams.market_id,
       });
 
       console.log("Order response:", response.data);
-      toast(`Order placed, Order ${response.data.id} placed successfully`);
+      toast.success(`Order placed successfully! Order #${response.data.id}`);
 
+      // Clear form
       setPrice("");
       setQuantity("");
+
+      // Refresh data
       fetchDepth();
       fetchOpenOrders();
     } catch (error) {
@@ -169,10 +225,15 @@ export default function EventPage({
       let errorMessage = "Failed to place order. Please try again.";
 
       if (axios.isAxiosError(error)) {
-        errorMessage = error.response?.data?.message || errorMessage;
+        errorMessage =
+          error.response?.data?.message ||
+          error.response?.data?.error ||
+          errorMessage;
+      } else if (error instanceof Error) {
+        errorMessage = error.message;
       }
 
-      toast(`Error: ${errorMessage}`);
+      toast.error(`Error: ${errorMessage}`);
     } finally {
       setIsLoading(false);
     }
@@ -579,10 +640,26 @@ export default function EventPage({
             {/* Open Orders */}
             <Card>
               <CardHeader>
-                <CardTitle>Your Open Orders</CardTitle>
-                <CardDescription>
-                  Your active orders for this market
-                </CardDescription>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Your Open Orders</CardTitle>
+                    <CardDescription>
+                      Your active orders for this market
+                    </CardDescription>
+                  </div>
+                  <Button
+                    onClick={handleRefreshOrders}
+                    disabled={isRefreshingOrders}
+                    variant="outline"
+                    size="sm"
+                    className="flex items-center gap-2"
+                  >
+                    <RefreshCw
+                      className={`h-4 w-4 ${isRefreshingOrders ? "animate-spin" : ""}`}
+                    />
+                    Refresh
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 {openOrders.length > 0 ? (
@@ -640,7 +717,14 @@ export default function EventPage({
                   </div>
                 ) : (
                   <div className="text-center py-8 text-gray-500">
-                    No open orders for this market
+                    {isRefreshingOrders ? (
+                      <div className="flex items-center justify-center gap-2">
+                        <div className="animate-spin h-4 w-4 border-2 border-gray-400 border-t-transparent rounded-full" />
+                        Loading orders...
+                      </div>
+                    ) : (
+                      "No open orders for this market"
+                    )}
                   </div>
                 )}
               </CardContent>
